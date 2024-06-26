@@ -10,6 +10,7 @@ from datetime import datetime
 from django.db.models import Sum
 from . import forms
 from .constants import TRANSACTION_TYPE
+from .utils import TransactionMail
 from accounts.models import UserBankAccount
 
 # Create your views here.
@@ -43,6 +44,7 @@ class DepositMoneyView(TransactionCreateMixin):
             update_fields = ['balance']
         )
         messages.success(self.request,f'{"{:,.2f}".format(float(amount))}$ was deposited to your account successfully')
+        TransactionMail("Deposite", self.request.user, amount)
         return super().form_valid(form)
     
 class WithdrawalMoneyView(TransactionCreateMixin):
@@ -61,6 +63,7 @@ class WithdrawalMoneyView(TransactionCreateMixin):
         )
         
         messages.success(self.request, f'Successfully withdrawn {"{:,.2f}".format(float(amount))}$ from your account')
+        TransactionMail("Withdrawn", self.request.user, amount)
         return super().form_valid(form)
     
 class LoanRequestView(TransactionCreateMixin):
@@ -77,6 +80,7 @@ class LoanRequestView(TransactionCreateMixin):
             return HttpResponse('You have crossed your limits')
         
         messages.success(self.request, f'Loan request for {"{:,.2f}".format(float(amount))}$ submitted successfully')
+        TransactionMail('Loan request', self.request.user, amount)
         return super().form_valid(form)
 
 
@@ -123,6 +127,7 @@ class PayLoanView(LoginRequiredMixin, View):
                 user_account.save()
                 loan.transaction_type = 4
                 loan.save()
+                TransactionMail('Pay loan request', self.request.user, loan.amount)
                 return redirect('loan_list')
             else:
                 messages.error(request, message='Loan amount is greter then available balance.')
@@ -158,28 +163,38 @@ class TransferMoneyView(View):
             amount = form.cleaned_data.get('amount')
             transfer_id = form.cleaned_data.get('transfer_id')
             current_account = request.user.account
-            try:
-                transfer_account = UserBankAccount.objects.get(account_no=transfer_id)
-                current_account.balance -= amount
-                transfer_account.balance += amount
-                current_account.save()
-                transfer_account.save()
-                messages.success(request, f'Your transfer of ${amount} to {transfer_account} has been completed successfully.')
-                
-                Transaction.objects.create(
-                    account = current_account,
-                    amount = amount,
-                    balance_after_transaction=current_account.balance,
-                    transaction_type = 5,
-                )
-                
-                Transaction.objects.create(
-                    account = transfer_account,
-                    amount = amount,
-                    balance_after_transaction=transfer_account.balance,
-                    transaction_type = 6,
-                )
-                
-            except UserBankAccount.DoesNotExist:
-                messages.error(request, f'Transfer account no {transfer_id} doesn\'t exist!')
+            min_transfer = 10
+            max_transfer = 100000
+            if amount > current_account.balance:
+                messages.error(request, f"You don't have enough balance! Your current balance ${current_account.balance}")
+            elif amount < min_transfer:
+                 messages.error(request, f"Minimum transfer amount ${min_transfer}")
+            elif amount > max_transfer:
+                 messages.error(request, f"You can transfer maximum ${min_transfer}")
+            else:
+                try:
+                    transfer_account = UserBankAccount.objects.get(account_no=transfer_id)
+                    current_account.balance -= amount
+                    transfer_account.balance += amount
+                    current_account.save()
+                    transfer_account.save()
+                    messages.success(request, f'Your transfer of ${amount} to {transfer_account} has been completed successfully.')
+                    
+                    transaction_current_account=Transaction.objects.create(
+                        account = current_account,
+                        amount = amount,
+                        balance_after_transaction=current_account.balance,
+                        transaction_type = 5,
+                    )
+                    
+                    transaction_receiver_account = Transaction.objects.create(
+                        account = transfer_account,
+                        amount = amount,
+                        balance_after_transaction=transfer_account.balance,
+                        transaction_type = 6,
+                    )
+                    TransactionMail('receive money', transfer_account.user, amount, self.request.user, transaction_receiver_account.id)
+                    TransactionMail('transfer money', self.request.user, amount, transfer_account.user, transaction_current_account.id)
+                except UserBankAccount.DoesNotExist:
+                    messages.error(request, f'Transfer account no {transfer_id} doesn\'t exist!')
         return redirect('transfer_money')  
